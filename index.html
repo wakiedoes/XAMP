@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+    <title>Dev Helper - Full Project Editor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        /* CSS tidak berubah */
+        html { overflow-x: auto; } body { background-color: #1f2937; color: #f3f4f6; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; overflow-y: hidden; min-width: 1000px; } .editor-wrapper { position: relative; width: 100%; height: 100%; } .highlight-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; padding: inherit; pointer-events: none; white-space: pre; overflow: hidden; font-family: inherit; font-size: inherit; line-height: inherit; } .code-highlight { background-color: rgba(255, 255, 0, 0.4); border-radius: 3px; } .current-highlight { background-color: rgba(255, 165, 0, 0.6); border-radius: 3px; } .editor-textarea { position: absolute; top: 0; left: 0; width: 100%; height: 100%; padding: inherit; background-color: transparent; color: transparent; caret-color: white; border: none; resize: none; white-space: pre; overflow-wrap: normal; overflow: auto; } body.is-dragging-x, body.is-dragging-x * { cursor: col-resize !important; user-select: none !important; } body.is-dragging-y, body.is-dragging-y * { cursor: row-resize !important; user-select: none !important; } .splitter-x { cursor: col-resize; flex-shrink: 0; background-color: #4b5563; } .splitter-x:hover { background-color: #3b82f6; } .splitter-y { cursor: row-resize; flex-shrink: 0; background-color: #4b5563; } .splitter-y:hover { background-color: #3b82f6; } .file-item { cursor: pointer; padding: 4px 8px; border-radius: 4px; display: flex; align-items: center; gap: 8px; } .file-item:hover { background-color: #4A5568; } .file-item.active { background-color: #3b82f6; color: white; } .folder-toggle { transition: transform 0.2s; } .folder-toggle.open { transform: rotate(90deg); } .delete-btn { visibility: hidden; opacity: 0; transition: opacity 0.2s ease-in-out; } .file-item:hover .delete-btn { visibility: visible; opacity: 1; } .file-tree-wrapper { transition: opacity 0.3s ease-in-out, max-height 0.3s ease-in-out; overflow: hidden; max-height: 1000px; } .file-tree-wrapper.hidden { max-height: 0; padding-top: 0 !important; padding-bottom: 0 !important; margin-top: 0 !important; margin-bottom: 0 !important; opacity: 0; overflow: hidden; }
+    </style>
+</head>
+<body>
+    <div id="app" class="h-screen flex flex-row">
+        <!-- Struktur HTML tidak berubah -->
+        <input type="file" ref="fileInput" @change="handleFileImport" multiple style="display: none;" accept=".html,.css,.js,.txt,.json,.md,.svg,.png,.jpg,.jpeg,.gif,.webp"> <input type="file" ref="folderInput" @change="handleFolderImport" webkitdirectory directory multiple style="display: none;">
+        <div id="left-panel" class="flex flex-col bg-gray-900 overflow-hidden" :style="leftPanelStyle">
+            <div class="flex justify-between items-center p-2 border-b border-gray-600 text-sm flex-shrink-0">
+                 <div class="flex items-center gap-2"> <button @click="toggleExplorerVisibility" title="Toggle File Explorer Tree" class="p-1 rounded-full hover:bg-gray-700"> <span class="transition-transform duration-200 inline-block" :class="{'rotate-[-90deg]': !isExplorerTreeVisible}">▼</span> </button> <h3 class="font-bold text-gray-400 uppercase">Berkas</h3> </div>
+                <div class="flex gap-2"> <button @click="saveProjectAsZip" title="Save Project as ZIP" class="hover:text-white text-gray-400">💾</button> <button @click="triggerFolderImport()" title="Import Folder to Root" class="hover:text-white text-gray-400">📂</button> <button @click="triggerImport()" title="Import File(s) to Root" class="hover:text-white text-gray-400">📤</button> <button @click="addFileToProject" title="New File in Root" class="hover:text-white text-gray-400">📄</button> <button @click="addFolderToProject" title="New Folder in Root" class="hover:text-white text-gray-400">📁</button> </div>
+            </div>
+            <div class="file-tree-wrapper flex-1 overflow-y-auto p-2 text-sm" :class="{ 'hidden': !isExplorerTreeVisible }"> <file-tree-node v-for="item in projectFiles" :key="item.path" :node="item"></file-tree-node> </div>
+        </div>
+        <div id="splitter-x" class="splitter-x w-[10px] h-full transition-colors" @mousedown="startDragX" @touchstart="startDragX"></div>
+        <div id="right-panel" class="flex-1 flex flex-col bg-gray-800 overflow-hidden">
+            <div id="editor-sub-panel" class="flex flex-col overflow-hidden" :style="editorSubPanelStyle">
+                <div class="p-2 border-b border-gray-600 bg-gray-900 flex-shrink-0 flex justify-between items-center">
+                    <div class="flex items-center gap-3"><h2 class="text-base font-bold">Editor</h2><span class="text-xs text-gray-400 mt-1">{{ getFileDisplayPath(currentOpenFile) }}</span></div> <button @click="saveFile" class="px-3 py-1 text-xs bg-gray-600 hover:bg-gray-500 rounded" :disabled="isViewingImage">Save to Disk</button>
+                </div>
+                <div v-if="isViewingImage && currentOpenFile" class="flex-1 p-4 flex flex-col items-center justify-center bg-gray-800 overflow-auto">
+                    <img :src="currentOpenFile.content" ref="imagePreviewEl" @load="getImageDimensions" class="max-w-full max-h-[85%] object-contain bg-white/10 p-2 rounded-md" alt="Image preview"/>
+                    <div class="text-sm text-gray-400 mt-4 flex items-center gap-4"> <span>Dimensions: {{ imageWidth }} x {{ imageHeight }} px</span> <button @click="resizeImage" class="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 rounded" title="Change image dimensions">Resize</button> </div>
+                     <p class="text-xs text-gray-500 mt-2">Image Preview (Click 'Resize' to modify)</p>
+                </div>
+                <div v-else class="flex-1 p-2 md:p-4 overflow-auto editor-wrapper">
+                    <div ref="highlightOverlay" class="highlight-overlay" v-html="highlightedHtml"></div> <textarea ref="editorTextarea" v-model="fullCode" @scroll="syncScroll" class="editor-textarea" :disabled="!currentOpenFile"></textarea>
+                </div>
+                <div class="p-2 md:p-4 border-t border-gray-600 bg-gray-900 flex-shrink-0">
+                    <div class="flex items-center justify-between mb-2"><label for="search" class="block text-xs md:text-sm font-bold text-gray-400">Find in Code</label><div class="text-xs text-gray-500" v-if="searchQuery && matchCount > 0">{{ currentMatchIndex + 1 }} of {{ matchCount }}</div></div>
+                    <div class="flex gap-2">
+                        <input id="search" type="text" v-model="searchQuery" @keydown.enter="nextMatch" placeholder="Type text to find..." class="flex-1 p-2 bg-gray-700 border border-gray-600 rounded-md text-white" ref="searchInput" :disabled="isViewingImage" /> <button @click="clearSearch" class="px-3 bg-gray-600 hover:bg-gray-500 rounded-md" :disabled="!searchQuery || isViewingImage" title="Clear search">✕</button>
+                        <div class="flex gap-1"> <button @click="prevMatch" class="px-3 bg-blue-600 hover:bg-blue-500 rounded-md" :disabled="!searchQuery || matchCount === 0 || isViewingImage" title="Previous match">↑</button> <button @click="nextMatch" class="px-3 bg-blue-600 hover:bg-blue-500 rounded-md" :disabled="!searchQuery || matchCount === 0 || isViewingImage" title="Next match">↓</button> </div>
+                    </div>
+                </div>
+            </div>
+            <div id="splitter-y" class="splitter-y h-[10px] w-full transition-colors" @mousedown="startDragY" @touchstart="startDragY"></div>
+            <div id="preview-sub-panel" class="flex-1 flex flex-col bg-gray-700 overflow-hidden">
+                <div class="p-2 md:p-4 border-b border-gray-600 bg-gray-900 flex justify-between items-center flex-shrink-0">
+                    <h2 class="text-base md:text-lg font-bold">Live Preview</h2> <button @click="updateIframe" class="px-3 py-1 text-xs md:text-sm bg-green-500 hover:bg-green-600 rounded">Run</button>
+                </div>
+                <div class="flex-1 p-0 bg-gray-900"> <iframe ref="iframe" class="w-full h-full bg-black border-none"></iframe> </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, computed, onMounted, onUnmounted, watch, nextTick, inject, provide } = Vue;
+        const app = createApp({
+            setup() {
+                const fullCode = ref(''); const iframe = ref(null); const editorTextarea = ref(null); const highlightOverlay = ref(null); const searchInput = ref(null); const fileInput = ref(null); const folderInput = ref(null); const importTargetFolder = ref(null); const searchQuery = ref(''); const currentMatchIndex = ref(-1); const matchCount = ref(0); const matches = ref([]); const isExplorerTreeVisible = ref(true); const leftPanelWidth = ref(280); const editorSubPanelHeight = ref(60); const imagePreviewEl = ref(null); const imageWidth = ref(0); const imageHeight = ref(0);
+                const MIN_LEFT_PANEL_WIDTH = 150; const MAX_LEFT_PANEL_WIDTH_PERCENT = 50; const MIN_EDITOR_SUB_PANEL_HEIGHT_PERCENT = 15; const MIN_PREVIEW_SUB_PANEL_HEIGHT_PERCENT = 15;
+
+                const initialHtmlContent = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>2D Explore Game</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="game-container">
+    <div class="softkeys">
+      <button id="left">⬅</button>
+      <button id="right">➡</button>
+      <button id="up">⬆</button>
+      <button id="down">⬇</button>
+    </div>
+  </div>
+  <script type="module" src="main.js"><\/script>
+</body>
+</html>`;
+                
+                const initialCssContent = `body, html { margin: 0; overflow: hidden; touch-action: none; } #game-container { position: relative; width: 100vw; height: 100vh; overflow: hidden; } canvas { display: block; } .softkeys { position: absolute; bottom: 20px; left: 20px; z-index: 10; } .softkeys button { width: 60px; height: 60px; margin: 5px; font-size: 20px; border-radius: 10px; }`;
+                
+                // === PERUBAHAN DI SINI: initialJsContent diperbarui ===
+                const initialJsContent = `import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+const ASSET_URLS = window.ASSET_URLS || {};
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera( window.innerWidth / -2, window.innerWidth / 2, window.innerHeight / 2, window.innerHeight / -2, 0.1, 1000 );
+camera.position.z = 10;
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+const gameContainer = document.getElementById('game-container');
+if (gameContainer) { gameContainer.appendChild(renderer.domElement); } else { console.error('Game container not found!'); document.body.appendChild(renderer.domElement); }
+const loader = new THREE.TextureLoader();
+
+const backgroundUrl = ASSET_URLS['assets/background.png'] || 'assets/background.png';
+loader.load(backgroundUrl, texture => { 
+    // Untuk background, kita biarkan ukurannya besar agar menutupi layar
+    const bgGeo = new THREE.PlaneGeometry(2000, 1000); 
+    const bgMat = new THREE.MeshBasicMaterial({ map: texture }); 
+    const bg = new THREE.Mesh(bgGeo, bgMat); 
+    bg.position.set(0, 0, -10); 
+    scene.add(bg); 
+});
+
+let character;
+const characterUrl = ASSET_URLS['assets/character.png'] || 'assets/character.png';
+loader.load(characterUrl, texture => {
+  // BARU: Dapatkan ukuran dari tekstur yang dimuat
+  const imageWidth = texture.image.width;
+  const imageHeight = texture.image.height;
+
+  // DIUBAH: Gunakan ukuran dinamis dari gambar, bukan hardcoded 64x64
+  const charGeo = new THREE.PlaneGeometry(imageWidth, imageHeight);
+  
+  const charMat = new THREE.MeshBasicMaterial({ map: texture, transparent: true }); 
+  character = new THREE.Mesh(charGeo, charMat); 
+  character.position.set(100, 64, 0); 
+  scene.add(character); 
+});
+
+const keys = { left: false, right: false, up: false, down: false };
+document.getElementById('left').addEventListener('touchstart', () => keys.left = true, { passive: true }); document.getElementById('left').addEventListener('touchend', () => keys.left = false); document.getElementById('right').addEventListener('touchstart', () => keys.right = true, { passive: true }); document.getElementById('right').addEventListener('touchend', () => keys.right = false); document.getElementById('up').addEventListener('touchstart', () => keys.up = true, { passive: true }); document.getElementById('up').addEventListener('touchend', () => keys.up = false); document.getElementById('down').addEventListener('touchstart', () => keys.down = true, { passive: true }); document.getElementById('down').addEventListener('touchend', () => keys.down = false);
+function animate() { requestAnimationFrame(animate); if (character) { const speed = 5; if (keys.left) character.position.x -= speed; if (keys.right) character.position.x += speed; if (keys.up) character.position.y += speed; if (keys.down) character.position.y -= speed; camera.position.x = character.position.x; camera.position.y = character.position.y; } renderer.render(scene, camera); } animate();
+window.addEventListener('resize', () => { camera.left = window.innerWidth / -2; camera.right = window.innerWidth / 2; camera.top = window.innerHeight / 2; camera.bottom = window.innerHeight / -2; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });`;
+
+                const createPlaceholderPng = (w, h, color, text) => { const c = document.createElement('canvas'); c.width=w; c.height=h; const ctx=c.getContext('2d'); ctx.fillStyle=color; ctx.fillRect(0,0,w,h); if(text){ctx.fillStyle='white';ctx.font=`bold ${h/4}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(text,w/2,h/2);} return c.toDataURL('image/png'); };
+                const projectFiles = ref([ { name: 'index.html', type: 'file', content: initialHtmlContent }, { name: 'main.js', type: 'file', content: initialJsContent }, { name: 'style.css', type: 'file', content: initialCssContent }, { name: 'assets', type: 'folder', isOpen: true, children: [ { name: 'character.png', type: 'file', content: createPlaceholderPng(64, 64, '#0000FF', 'C') }, { name: 'background.png', type: 'file', content: createPlaceholderPng(2000, 1000, '#4CAF50', 'BG') } ]} ]);
+                const currentOpenFile = ref(null);
+                
+                const isImageFile = (f) => /\.(png|jpe?g|gif|svg|webp)$/i.test(f||''); const isViewingImage = computed(() => currentOpenFile.value && isImageFile(currentOpenFile.value.name)); const openFile = (file) => { if (file.type !== 'file') return; currentOpenFile.value = file; if (!isViewingImage.value) { fullCode.value = file.content; } else { imageWidth.value = 0; imageHeight.value = 0; } clearSearch(); nextTick(() => { if (editorTextarea.value && !isViewingImage.value) editorTextarea.value.focus(); }); }; const findItemByPath = (path, collection = projectFiles.value) => { for (const item of collection) { if (item.path === path) return item; if (item.type === 'folder' && item.children) { const found = findItemByPath(path, item.children); if (found) return found; } } return null; }; const updateAllPaths = (collection, parentPath = '') => { collection.forEach(item => { const currentPath = parentPath ? `${parentPath}/${item.name}` : item.name; item.path = currentPath; if (item.type === 'folder' && item.children) { updateAllPaths(item.children, currentPath); } }); }; const getFileDisplayPath = (file) => file ? file.path : 'No file open'; const addFileToFolder = (folder) => { const fileName = prompt(`Enter new file name for folder "${folder.name}":`); if (fileName) { if (folder.children.some(child => child.name === fileName)) { alert(`An item named "${fileName}" already exists in this folder.`); return; } const newFile = { name: fileName, type: 'file', content: isImageFile(fileName) ? '' : `// New file: ${fileName}\n` }; folder.children.push(newFile); updateAllPaths(projectFiles.value); openFile(findItemByPath(newFile.path)); } }; const addFolderToFolder = (parentFolder) => { const folderName = prompt(`Enter new folder name inside "${parentFolder.name}":`); if (folderName) { if (parentFolder.children.some(item => item.name === folderName)) { alert(`An item named "${folderName}" already exists.`); return; } parentFolder.children.push({ name: folderName, type: 'folder', isOpen: true, children: [] }); updateAllPaths(projectFiles.value); } }; const deleteItem = (itemToDelete) => { const message = itemToDelete.type === 'folder' ? `Are you sure you want to delete the folder "${itemToDelete.name}" and all its contents?` : `Are you sure you want to delete the file "${itemToDelete.name}"?`; if (!window.confirm(message)) return; const findAndRemove = (collection, item) => { const index = collection.findIndex(i => i.path === item.path); if (index !== -1) { collection.splice(index, 1); return true; } for (const current of collection) { if (current.type === 'folder' && current.children) { if (findAndRemove(current.children, item)) return true; } } return false; }; if (findAndRemove(projectFiles.value, itemToDelete)) { if (currentOpenFile.value && !findItemByPath(currentOpenFile.value.path)) { currentOpenFile.value = null; fullCode.value = '// Select a file to start editing.'; } updateAllPaths(projectFiles.value); } };
+                const triggerImport = (targetFolder = null) => { importTargetFolder.value = targetFolder || findItemByPath('assets') || null; if(fileInput.value) fileInput.value.click(); }; const triggerFolderImport = (targetFolder = null) => { importTargetFolder.value = targetFolder; if(folderInput.value) folderInput.value.click(); }; provide('actions', { openFile, addFileToFolder, addFolderToFolder, deleteItem, triggerImport, triggerFolderImport }); provide('state', { currentOpenFile }); watch(fullCode, (newValue) => { if (currentOpenFile.value && !isViewingImage.value) { currentOpenFile.value.content = newValue; } }); const toggleExplorerVisibility = () => { isExplorerTreeVisible.value = !isExplorerTreeVisible.value; }; const addFileToProject = () => addFileToFolder({ children: projectFiles.value, name: 'root', path: ''}); const addFolderToProject = () => addFolderToFolder({ children: projectFiles.value, name: 'root', path: ''}); const readFileAsPromise = (file) => { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; if (isImageFile(file.name)) { reader.readAsDataURL(file); } else { reader.readAsText(file); } }); }; const handleFileImport = async (event) => { const files = event.target.files; if (!files || files.length === 0) { importTargetFolder.value = null; return; } let targetCollection = importTargetFolder.value ? importTargetFolder.value.children : projectFiles.value; if (!importTargetFolder.value) { const assetsFolder = findItemByPath('assets'); if (assetsFolder) targetCollection = assetsFolder.children; } for (const file of Array.from(files)) { try { const content = await readFileAsPromise(file); const existingItem = targetCollection.find(item => item.name === file.name); if (existingItem && window.confirm(`File "${file.name}" already exists. Overwrite?`)) { existingItem.content = content; if (currentOpenFile.value === existingItem) openFile(existingItem); updateIframe(); } else if (!existingItem) { targetCollection.push({ name: file.name, type: 'file', content: content }); } } catch (error) { alert(`Could not read file: ${file.name}.`); } } updateAllPaths(projectFiles.value); if(event.target) event.target.value = ''; importTargetFolder.value = null; updateIframe(); }; const handleFolderImport = async (event) => { const files = event.target.files; if (!files || files.length === 0) { importTargetFolder.value = null; return; } for (const file of Array.from(files)) { if (!file.webkitRelativePath) { alert("This browser doesn't support folder imports."); return; } const pathParts = file.webkitRelativePath.split('/'); const fileName = pathParts.pop(); let currentLevel = importTargetFolder.value ? importTargetFolder.value.children : projectFiles.value; for (const part of pathParts) { if (!part) continue; let folder = currentLevel.find(item => item.name === part && item.type === 'folder'); if (!folder) { folder = { name: part, type: 'folder', isOpen: true, children: [] }; currentLevel.push(folder); } currentLevel = folder.children; } try { const content = await readFileAsPromise(file); const existingFile = currentLevel.find(item => item.name === fileName && item.type === 'file'); if (existingFile) { existingFile.content = content; } else { currentLevel.push({ name: fileName, type: 'file', content: content }); } } catch (error) { alert(`Could not read file: ${file.name}.`); } } updateAllPaths(projectFiles.value); if(event.target) event.target.value = ''; importTargetFolder.value = null; updateIframe(); };
+                const saveFile = () => { if (!currentOpenFile.value) { alert("No file is open to save."); return; } if (isViewingImage.value) { const link = document.createElement('a'); link.href = currentOpenFile.value.content; link.download = currentOpenFile.value.name; link.click(); return; } const blob = new Blob([currentOpenFile.value.content], { type: 'text/plain;charset=utf-8' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = currentOpenFile.value.name; document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(link.href); }; const saveProjectAsZip = async () => { if (typeof JSZip === 'undefined') { alert('Error: JSZip library is not loaded.'); return; } const zip = new JSZip(); const addFilesToZip = (items, currentFolder) => { items.forEach(item => { if (item.type === 'folder') { const subFolder = currentFolder.folder(item.name); addFilesToZip(item.children, subFolder); } else { if (isImageFile(item.name) && typeof item.content === 'string' && item.content.startsWith('data:')) { const base64Data = item.content.split(',')[1]; currentFolder.file(item.name, base64Data, { base64: true }); } else { currentFolder.file(item.name, item.content); } } }); }; addFilesToZip(projectFiles.value, zip); try { const blob = await zip.generateAsync({ type: 'blob' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = "project.zip"; document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(link.href); } catch (e) { console.error(e); alert("An error occurred while creating the ZIP file."); } };
+                const getImageDimensions = () => { if (!imagePreviewEl.value) return; imageWidth.value = imagePreviewEl.value.naturalWidth; imageHeight.value = imagePreviewEl.value.naturalHeight; };
+                
+                const resizeImage = () => {
+                    if (!isViewingImage.value || !currentOpenFile.value) { alert("Please open an image file to resize."); return; }
+                    const newSize = prompt(`Enter new dimensions for "${currentOpenFile.value.name}" (format: widthxheight, e.g., 32x32):`, `${imageWidth.value}x${imageHeight.value}`);
+                    if (!newSize || !/^\d+x\d+$/i.test(newSize)) { if (newSize !== null) alert("Invalid format. Please use 'widthxheight', for example: 64x64."); return; }
+                    const [newWidth, newHeight] = newSize.split('x').map(Number);
+                    if (isNaN(newWidth) || isNaN(newHeight) || newWidth <= 0 || newHeight <= 0) { alert("Invalid dimensions. Width and height must be positive numbers."); return; }
+                    
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = newWidth;
+                        canvas.height = newHeight;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, newWidth, newHeight);
+                        currentOpenFile.value.content = canvas.toDataURL('image/png');
+                        updateIframe();
+                    };
+                    img.onerror = () => { alert("Failed to load image for resizing."); };
+                    img.src = currentOpenFile.value.content;
+                };
+
+                const leftPanelStyle = computed(() => ({ width: `${leftPanelWidth.value}px`, flexShrink: 0 })); const editorSubPanelStyle = computed(() => ({ height: `${editorSubPanelHeight.value}%`, flexShrink: 0 }));
+                const highlightedHtml = computed(() => { if (!fullCode.value || isViewingImage.value) return ''; let tempCode = fullCode.value; if (!tempCode.endsWith('\n')) tempCode += '\n'; if (!searchQuery.value) { currentMatchIndex.value = -1; matchCount.value = 0; matches.value = []; return escapeHtml(tempCode); } const escapedCode = escapeHtml(tempCode); const escapedSearch = escapeHtml(searchQuery.value); try { const regex = new RegExp(escapedSearch.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'gi'); let match; const newMatches = []; matchCount.value = 0; while ((match = regex.exec(escapedCode)) !== null) { newMatches.push({ start: match.index, end: match.index + match[0].length }); matchCount.value++; } matches.value = newMatches; if (newMatches.length === 0) { currentMatchIndex.value = -1; return escapedCode;} if (currentMatchIndex.value >= newMatches.length || currentMatchIndex.value < 0) { currentMatchIndex.value = 0; nextTick(() => scrollToMatch(currentMatchIndex.value)); } const parts = []; let lastIndex = 0; newMatches.forEach((m, index) => { parts.push(escapedCode.substring(lastIndex, m.start)); const isCurrent = index === currentMatchIndex.value; const highlightClass = isCurrent ? 'current-highlight' : 'code-highlight'; parts.push(`<span class="${highlightClass}">${escapedCode.substring(m.start, m.end)}</span>`); lastIndex = m.end; }); parts.push(escapedCode.substring(lastIndex)); return parts.join(''); } catch (e) { console.error("Regex error:", e); return escapedCode; } });
+                function escapeHtml(text) { if (typeof text !== 'string') return ''; return text.replace(/[&<>"']/g, (match) => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[match])); }
+                const syncScroll = () => { if (highlightOverlay.value && editorTextarea.value) { highlightOverlay.value.scrollTop = editorTextarea.value.scrollTop; highlightOverlay.value.scrollLeft = editorTextarea.value.scrollLeft; } };
+                
+                let blobUrls = new Map();
+                const cleanupBlobUrls = () => { blobUrls.forEach(url => URL.revokeObjectURL(url)); blobUrls.clear(); };
+                const updateIframe = () => { if (!iframe.value) return; cleanupBlobUrls(); const fileMap = new Map(); const collectFiles = (items) => { items.forEach(item => { if (item.type === 'file') { fileMap.set(item.path, item); } else if (item.children) { collectFiles(item.children); } }); }; collectFiles(projectFiles.value); const indexFile = fileMap.get('index.html'); if (!indexFile) { iframe.value.srcdoc = '<h2>Error: index.html not found.</h2>'; return; } const assetUrlMap = {}; fileMap.forEach((file, path) => { let blob; if (isImageFile(path) && file.content.startsWith('data:')) { const byteString = atob(file.content.split(',')[1]); const mimeString = file.content.split(',')[0].split(':')[1].split(';')[0]; const ab = new ArrayBuffer(byteString.length); const ia = new Uint8Array(ab); for (let i = 0; i < byteString.length; i++) { ia[i] = byteString.charCodeAt(i); } blob = new Blob([ab], { type: mimeString }); } else { const mime = path.endsWith('.js') ? 'application/javascript' : (path.endsWith('.css') ? 'text/css' : 'text/plain'); blob = new Blob([file.content], { type: `${mime};charset=utf-8` }); } const url = URL.createObjectURL(blob); blobUrls.set(path, url); assetUrlMap[path] = url; }); let finalHtml = indexFile.content; finalHtml = finalHtml.replace(/<link.*href="style.css".*?>/, `<link rel="stylesheet" href="${assetUrlMap['style.css']}">`); finalHtml = finalHtml.replace(/<script.*src="main.js".*?><\/script>/, ''); finalHtml = finalHtml.replace('</head>', `<script>window.ASSET_URLS = ${JSON.stringify(assetUrlMap)};<\/script></head>`); finalHtml = finalHtml.replace('</body>', `<script type="module" src="${assetUrlMap['main.js']}"><\/script></body>`); iframe.value.srcdoc = finalHtml; };
+                
+                const scrollToMatch = (index) => { if (index < 0 || index >= matches.value.length || !editorTextarea.value) return; const match = matches.value[index]; const textarea = editorTextarea.value; const textUptoMatch = fullCode.value.substring(0, match.start); const lineHeight = parseFloat(window.getComputedStyle(textarea).lineHeight) || 18; const lines = textUptoMatch.split('\n').length; const scrollTop = (lines - 1) * lineHeight - (textarea.clientHeight / 3); textarea.scrollTop = Math.max(0, scrollTop); syncScroll(); textarea.focus(); textarea.setSelectionRange(match.start, match.end); }; const nextMatch = () => { if (matchCount.value === 0) return; currentMatchIndex.value = (currentMatchIndex.value + 1) % matchCount.value; scrollToMatch(currentMatchIndex.value); }; const prevMatch = () => { if (matchCount.value === 0) return; currentMatchIndex.value = (currentMatchIndex.value - 1 + matchCount.value) % matchCount.value; scrollToMatch(currentMatchIndex.value); }; const clearSearch = () => { searchQuery.value = ''; if (editorTextarea.value) editorTextarea.value.focus(); }; const getClientCoords = (e) => e.type.startsWith('touch') ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY };
+                let dragStartX, initialLeftPanelWidth, activeDragTypeX = null; const doDragX = (e) => { if (activeDragTypeX === 'touch') e.preventDefault(); const coords = getClientCoords(e); leftPanelWidth.value = Math.max(MIN_LEFT_PANEL_WIDTH, Math.min(initialLeftPanelWidth + (coords.x - dragStartX), window.innerWidth * (MAX_LEFT_PANEL_WIDTH_PERCENT / 100))); }; const stopDragX = () => { document.body.classList.remove('is-dragging-x'); document.removeEventListener(activeDragTypeX === 'mouse' ? 'mousemove' : 'touchmove', doDragX); document.removeEventListener(activeDragTypeX === 'mouse' ? 'mouseup' : 'touchend', stopDragX); activeDragTypeX = null; }; const startDragX = (e) => { if ((e.type === 'mousedown' && e.button !== 0) || activeDragTypeX) return; if (e.type === 'touchstart') e.preventDefault(); activeDragTypeX = e.type.startsWith('touch') ? 'touch' : 'mouse'; const coords = getClientCoords(e); dragStartX = coords.x; initialLeftPanelWidth = leftPanelWidth.value; document.body.classList.add('is-dragging-x'); document.addEventListener(activeDragTypeX === 'mouse' ? 'mousemove' : 'touchmove', doDragX, { passive: false }); document.addEventListener(activeDragTypeX === 'mouse' ? 'mouseup' : 'touchend', stopDragX); };
+                let dragStartY, initialEditorHeightPercent, rightPanelHeightForDrag, activeDragTypeY = null; const doDragY = (e) => { if (activeDragTypeY === 'touch') e.preventDefault(); const coords = getClientCoords(e); if (rightPanelHeightForDrag === 0) return; const deltaPercent = ((coords.y - dragStartY) / rightPanelHeightForDrag) * 100; editorSubPanelHeight.value = Math.max(MIN_EDITOR_SUB_PANEL_HEIGHT_PERCENT, Math.min(initialEditorHeightPercent + deltaPercent, 100 - MIN_PREVIEW_SUB_PANEL_HEIGHT_PERCENT)); }; const stopDragY = () => { document.body.classList.remove('is-dragging-y'); document.removeEventListener(activeDragTypeY === 'mouse' ? 'mousemove' : 'touchmove', doDragY); document.removeEventListener(activeDragTypeY === 'mouse' ? 'mouseup' : 'touchend', stopDragY); activeDragTypeY = null; }; const startDragY = (e) => { if ((e.type === 'mousedown' && e.button !== 0) || activeDragTypeY) return; if (e.type === 'touchstart') e.preventDefault(); activeDragTypeY = e.type.startsWith('touch') ? 'touch' : 'mouse'; const rightPanel = document.getElementById('right-panel'); if (!rightPanel) return; rightPanelHeightForDrag = rightPanel.offsetHeight; const coords = getClientCoords(e); dragStartY = coords.y; initialEditorHeightPercent = editorSubPanelHeight.value; document.body.classList.add('is-dragging-y'); document.addEventListener(activeDragTypeY === 'mouse' ? 'mousemove' : 'touchmove', doDragY, { passive: false }); document.addEventListener(activeDragTypeY === 'mouse' ? 'mouseup' : 'touchend', stopDragY); };
+
+                onMounted(() => { updateAllPaths(projectFiles.value); const firstFile = findItemByPath('main.js') || findItemByPath('index.html'); if (firstFile) openFile(firstFile); else { fullCode.value = "// No files in project."; } nextTick(() => { if (editorTextarea.value && highlightOverlay.value) { highlightOverlay.value.style.padding = window.getComputedStyle(editorTextarea.value).padding; } updateIframe(); }); });
+                onUnmounted(() => { if (activeDragTypeX) stopDragX(); if (activeDragTypeY) stopDragY(); cleanupBlobUrls(); });
+                
+                return { fullCode, iframe, editorTextarea, highlightOverlay, searchInput, fileInput, folderInput, searchQuery, highlightedHtml, currentMatchIndex, matchCount, updateIframe, syncScroll, startDragX, startDragY, nextMatch, prevMatch, clearSearch, projectFiles, currentOpenFile, saveFile, saveProjectAsZip, addFileToProject, addFolderToProject, triggerImport, handleFileImport, triggerFolderImport, handleFolderImport, isExplorerTreeVisible, toggleExplorerVisibility, getFileDisplayPath, leftPanelStyle, editorSubPanelStyle, isViewingImage, imagePreviewEl, imageWidth, imageHeight, getImageDimensions, resizeImage, };
+            }
+        });
+
+        app.component('file-tree-node', {
+            name: 'FileTreeNode', props: ['node'],
+            setup(props) {
+                const { openFile, addFileToFolder, addFolderToFolder, deleteItem, triggerImport, triggerFolderImport } = inject('actions'); const { currentOpenFile } = inject('state'); const toggleFolder = (folder) => { folder.isOpen = !folder.isOpen; };
+                const getIcon = (name) => { if (/\.(png|jpe?g|gif|svg|webp)$/i.test(name)) return '<span class="text-purple-400">🖼️</span>'; if (name.endsWith('.html')) return '<span class="text-orange-500">🄷</span>'; if (name.endsWith('.css')) return '<span class="text-blue-400">🄲</span>'; if (name.endsWith('.js')) return '<span class="text-yellow-400">🄹</span>'; return '📄'; };
+                return { openFile, addFileToFolder, addFolderToFolder, deleteItem, triggerImport, triggerFolderImport, currentOpenFile, toggleFolder, getIcon };
+            },
+            template: `
+                <div>
+                    <div v-if="node.type === 'folder'">
+                        <div class="file-item font-bold" :class="{'bg-gray-700': node.isOpen}">
+                            <div @click="toggleFolder(node)" class="flex items-center gap-2 flex-grow"> <span class="folder-toggle" :class="{ 'open': node.isOpen }">▶</span> <span class="text-yellow-400">📁</span> <span>{{ node.name }}</span> </div>
+                            <button @click.stop="deleteItem(node)" class="delete-btn ml-auto text-red-500 hover:text-red-400" title="Delete folder">🗑️</button>
+                        </div>
+                        <div v-if="node.isOpen" class="ml-4 border-l border-gray-700 pl-2">
+                            <file-tree-node v-for="child in node.children" :key="child.path" :node="child"></file-tree-node>
+                            <div @click.stop="addFileToFolder(node)" class="file-item text-gray-400 italic hover:text-white pl-2"> <span class="mr-1">+</span><span>Add File</span> </div>
+                            <div @click.stop="addFolderToFolder(node)" class="file-item text-gray-400 italic hover:text-white pl-2"> <span class="mr-1">📁</span><span>Add Folder</span> </div>
+                            <div @click.stop="triggerImport(node)" class="file-item text-gray-400 italic hover:text-white pl-2"> <span class="mr-1">📤</span><span>Import File(s)</span> </div>
+                            <div @click.stop="triggerFolderImport(node)" class="file-item text-gray-400 italic hover:text-white pl-2"> <span class="mr-1">📂</span><span>Import Folder</span> </div>
+                        </div>
+                    </div>
+                    <div v-else class="file-item" :class="{ 'active': currentOpenFile && currentOpenFile.path === node.path }">
+                        <div @click="openFile(node)" class="flex items-center gap-2 flex-grow"> <span v-html="getIcon(node.name)"></span> <span>{{ node.name }}</span> </div>
+                        <button @click.stop="deleteItem(node)" class="delete-btn ml-auto text-red-500 hover:text-red-400" title="Delete file">🗑️</button>
+                    </div>
+                </div>
+            `
+        });
+        app.mount('#app');
+    </script>
+</body>
+</html>
